@@ -1,94 +1,136 @@
 import streamlit as st
 import feedparser
 import openai
-from datetime import datetime
 
 # --- KONFIGURÁCIÓ ---
-# Itt kellene megadnod az OpenAI API kulcsodat, ha élesben használod
-# openai.api_key = "A_TE_API_KULCSOD"
+# Ha van titkos kulcsod a Streamlit Secrets-ben, onnan olvassa, ha nincs, demo mód.
+if "OPENAI_API_KEY" in st.secrets:
+    openai.api_key = st.secrets["OPENAI_API_KEY"]
 
-# Hírforrások (RSS feedek)
 RSS_FEEDS = {
     "BBC World": "http://feeds.bbci.co.uk/news/world/rss.xml",
     "Variety": "https://variety.com/feed/",
-    "Reuters (Wire)": "https://www.reutersagency.com/feed/?best-topics=political-general&post_type=best" 
-    # Megjegyzés: A Reuters nyilvános RSS-e korlátozott, gyakran alternatív forrást kell használni.
+    "Reuters": "https://www.reutersagency.com/feed/?best-topics=political-general&post_type=best"
 }
 
-# --- FÜGGVÉNYEK ---
+# Alapértelmezett képek, ha a cikkben nincs (placeholder)
+DEFAULT_IMAGES = {
+    "BBC World": "https://upload.wikimedia.org/wikipedia/commons/4/4e/BBC_News_2019.svg",
+    "Variety": "https://variety.com/wp-content/uploads/2021/01/variety-logo-one-line-black.png",
+    "Reuters": "https://upload.wikimedia.org/wikipedia/commons/thumb/8/8d/Reuters_Logo.svg/1200px-Reuters_Logo.svg.png"
+}
+
+# --- SEGÉDFÜGGVÉNYEK ---
+
+def get_image_url(entry, source):
+    """Megpróbál képet találni az RSS bejegyzésben. Ha nincs, visszaadja a forrás logóját."""
+    # 1. Próbálkozás: 'media_content' (gyakori szabvány)
+    if 'media_content' in entry and len(entry.media_content) > 0:
+        return entry.media_content[0]['url']
+    
+    # 2. Próbálkozás: 'media_thumbnail' (pl. BBC néha ezt használja)
+    if 'media_thumbnail' in entry and len(entry.media_thumbnail) > 0:
+        return entry.media_thumbnail[0]['url']
+        
+    # 3. Próbálkozás: Keresés a linkek között
+    if 'links' in entry:
+        for link in entry.links:
+            if link.get('type', '').startswith('image/'):
+                return link['href']
+    
+    # Ha semmi nincs, akkor a forrás alapértelmezett logója
+    return DEFAULT_IMAGES.get(source, "https://via.placeholder.com/150")
 
 def get_news(feed_url):
-    """Hírek letöltése az RSS feedből"""
     feed = feedparser.parse(feed_url)
-    return feed.entries[:5] # Csak a legfrissebb 5 hír forrásonként
+    return feed.entries[:6] # Most már 6 hírt kérünk le
 
-def translate_and_summarize_ai(text, mode="translate"):
-    """
-    AI Funkció: Fordítás vagy Összefoglalás.
-    Ha nincs API kulcs, csak kiírja, hogy 'AI Demo'.
-    """
+def ai_summarize(text):
+    """AI Összefoglaló hívás"""
     if not openai.api_key:
-        return f"[AI DEMO - Nincs API Kulcs] Fordítás: {text} (Ez egy szimuláció)"
+        return "⚠️ Nincs beállítva OpenAI API kulcs. Ez csak egy demó szöveg."
     
     try:
-        if mode == "translate":
-            prompt = f"Fordítsd le ezt a szalagcímet magyarra profi újságírói stílusban: '{text}'"
-        elif mode == "summarize":
-            prompt = f"Foglald össze ezt a cikket magyarul 3 tömör pontban: '{text}'"
-            
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": prompt}]
+            messages=[{"role": "user", "content": f"Foglald össze ezt a cikket magyarul maximum 2 mondatban, figyelemfelkeltően: {text}"}]
         )
         return response.choices[0].message.content
     except Exception as e:
-        return f"Hiba az AI hívásban: {e}"
+        return f"Hiba: {e}"
 
-# --- APP FELÜLET (UI) ---
+# --- APP UI TERVEZÉS (CSS TRÜKKÖK) ---
 
-st.set_page_config(page_title="Hírek Most", page_icon="📰", layout="centered")
+st.set_page_config(page_title="Hírek Most", page_icon="🌍", layout="centered")
 
-# Mobilbarát fejléc
-st.title("🌍 Globális Hírek")
-st.markdown("*BBC • Variety • Reuters - Magyarul*")
+# Egy kis CSS, hogy szebb legyen mobilon (eltünteti a felesleges margókat)
+st.markdown("""
+    <style>
+    .block-container {
+        padding-top: 2rem;
+        padding-bottom: 2rem;
+    }
+    h1 { margin-bottom: 0px; }
+    div[data-testid="stExpander"] div[role="button"] p {
+        font-size: 1rem;
+        font-weight: 600;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
-# Oldalsáv (Beállítások)
+# Fejléc
+col_h1, col_h2 = st.columns([4, 1])
+with col_h1:
+    st.title("🌍 Hírek Most")
+with col_h2:
+    if st.button("🔄"):
+        st.rerun() # Frissítés gomb
+
+st.markdown("---")
+
+# Oldalsáv
 with st.sidebar:
     st.header("Beállítások")
-    ai_enabled = st.checkbox("AI Fordítás bekapcsolása", value=False)
-    st.info("AI nélkül az eredeti angol szöveg jelenik meg.")
+    filter_source = st.multiselect("Források szűrése", options=list(RSS_FEEDS.keys()), default=list(RSS_FEEDS.keys()))
+    ai_mode = st.toggle("🤖 AI Összefoglaló mód")
 
-# Hírek megjelenítése
-st.divider()
+# --- HÍRFOLYAM MEGJELENÍTÉSE ---
 
-for source_name, feed_url in RSS_FEEDS.items():
-    st.subheader(f"📌 {source_name}")
+# Végigmegyünk a kiválasztott forrásokon
+for source_name in filter_source:
+    feed_url = RSS_FEEDS[source_name]
+    st.subheader(source_name) # Pl. "BBC World" kiírása
+    
     news_items = get_news(feed_url)
     
     for item in news_items:
-        with st.container():
-            # Cím kezelése
-            title = item.title
-            if ai_enabled:
-                # Itt hívnánk meg az AI-t a cím fordítására (API kulcs szükséges)
-                # Most csak szimuláljuk a gyorsaság kedvéért, ha nincs kulcs
-                pass 
+        image_url = get_image_url(item, source_name)
+        
+        # --- ITT A LÉNYEG: A KÁRTYA ELRENDEZÉS ---
+        # border=True adja a keretet a hír köré
+        with st.container(border=True):
             
-            st.markdown(f"**{title}**")
+            # Két oszlopra bontjuk: Balra a kép, jobbra a szöveg
+            # A [1, 2] arány azt jelenti, hogy a szöveg kétszer annyi helyet kap
+            c1, c2 = st.columns([1, 2])
             
-            # Dátum és Link
-            published = item.get("published", "Nincs dátum")[:16]
-            st.caption(f"🕒 {published} | [Eredeti cikk elolvasása]({item.link})")
+            with c1:
+                st.image(image_url, use_container_width=True)
             
-            # AI Opció Gomb (Interaktív)
-            if st.button(f"🤖 AI Összefoglaló (Magyarul)", key=item.link):
-                with st.spinner('Az AI olvassa és fordítja a cikket...'):
-                    # Valós appnál itt a cikk teljes szövegét küldenénk be
-                    summary = translate_and_summarize_ai(item.summary, mode="summarize")
-                    st.success(summary)
-            
-            st.divider()
+            with c2:
+                st.markdown(f"**[{item.title}]({item.link})**")
+                
+                # Dátum formázása kicsit szebben
+                published = item.get("published", "")[:16]
+                st.caption(f"📅 {published}")
 
-# Footer
-st.markdown("---")
-st.markdown("Developed for Android via Web • 2024")
+            # AI Gomb / Összefoglaló rész a kártya alján
+            if ai_mode:
+                if st.button("Magyar összefoglaló", key=item.link):
+                    with st.spinner("Az AI dolgozik..."):
+                        summary = ai_summarize(item.summary)
+                        st.success(summary)
+            else:
+                # Ha nincs AI mód, egy lenyitható fülbe tesszük az eredeti szöveget
+                with st.expander("Eredeti előnézet"):
+                    st.write(item.get('summary', 'Nincs leírás.'))
